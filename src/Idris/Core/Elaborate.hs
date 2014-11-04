@@ -373,6 +373,7 @@ equiv tm = processTactic' (Equiv tm)
 
 -- | Turn the current hole into a pattern variable with the provided name, made unique if MN
 patvar :: Name -> Elab' aux ()
+patvar n@(SN _) = do apply (Var n) []; solve 
 patvar n = do env <- get_env
               hs <- get_holes
               if (n `elem` map fst env) then do apply (Var n) []; solve
@@ -380,6 +381,7 @@ patvar n = do env <- get_env
                                     UN _ -> return $! n
                                     MN _ _ -> unique_hole n
                                     NS _ _ -> return $! n
+                                    x -> return $! n
                         processTactic' (PatVar n')
 
 patbind :: Name -> Elab' aux ()
@@ -755,6 +757,14 @@ tryAll xs = tryAll' [] 999999 (cantResolve, 0) xs
                             if (s >= i) then (lift (tfail err), s)
                                         else (f, i)
 
+prunStateT
+  :: Int
+     -> Bool
+     -> [a]
+     -> Control.Monad.State.Strict.StateT
+          (ElabState t) (TC' Err) t1
+     -> ElabState t
+     -> TC' Err ((t1, Int, Idris.Core.Unify.Fails), ElabState t)
 prunStateT pmax zok ps x s
       = case runStateT x s of
              OK (v, s'@(ES (p, _) _ _)) ->

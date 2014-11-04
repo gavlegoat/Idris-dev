@@ -1,5 +1,6 @@
 {-# LANGUAGE PatternGuards #-}
-module Idris.Elab.Value(elabVal, elabValBind) where
+{-# OPTIONS_GHC -fwarn-incomplete-patterns -Werror #-}
+module Idris.Elab.Value(elabVal, elabValBind, elabDocTerms) where
 
 import Idris.AbsSyntax
 import Idris.ASTUtils
@@ -22,7 +23,7 @@ import Idris.Elab.Utils
 
 import Idris.Core.TT
 import Idris.Core.Elaborate hiding (Tactic(..))
-import Idris.Core.Evaluate
+import Idris.Core.Evaluate hiding (Unchecked)
 import Idris.Core.Execute
 import Idris.Core.Typecheck
 import Idris.Core.CaseTree
@@ -38,6 +39,7 @@ import Control.Monad
 import Control.Monad.State.Strict as State
 import Data.List
 import Data.Maybe
+import qualified Data.Traversable as Traversable
 import Debug.Trace
 
 import qualified Data.Map as Map
@@ -86,3 +88,24 @@ elabVal info aspat tm_in
         return (tm, ty)
 
 
+
+elabDocTerms :: ElabInfo -> Docstring (Either Err PTerm) -> Idris (Docstring DocTerm)
+elabDocTerms info str = do typechecked <- Traversable.mapM decorate str
+                           return $ checkDocstring mkDocTerm typechecked
+  where decorate (Left err) = return (Left err)
+        decorate (Right pt) = fmap (fmap fst) (tryElabVal info ERHS pt)
+
+        tryElabVal :: ElabInfo -> ElabMode -> PTerm -> Idris (Either Err (Term, Type))
+        tryElabVal info aspat tm_in
+           = idrisCatch (fmap Right $ elabVal info aspat tm_in)
+                        (return . Left)
+
+        mkDocTerm :: String -> [String] -> String -> Either Err Term -> DocTerm
+        mkDocTerm lang attrs src (Left err)
+          | map toLower lang == "idris" = Failing err
+          | otherwise                   = Unchecked
+        mkDocTerm lang attrs src (Right tm)
+          | map toLower lang == "idris" = if "example" `elem` map (map toLower) attrs
+                                            then Example tm
+                                            else Checked tm
+          | otherwise                   = Unchecked

@@ -8,9 +8,10 @@ module Idris.Core.Evaluate(normalise, normaliseTrace, normaliseC, normaliseAll,
                 Context, initContext, ctxtAlist, uconstraints, next_tvar,
                 addToCtxt, setAccess, setTotal, setMetaInformation, addCtxtDef, addTyDecl,
                 addDatatype, addCasedef, simplifyCasedef, addOperator,
-                lookupNames, lookupTyName, lookupTyNameExact, lookupTy, lookupTyExact, lookupP, lookupDef, lookupNameDef, lookupDefExact, lookupDefAcc, lookupVal,
+                lookupNames, lookupTyName, lookupTyNameExact, lookupTy, lookupTyExact, 
+                lookupP, lookupDef, lookupNameDef, lookupDefExact, lookupDefAcc, lookupDefAccExact, lookupVal,
                 mapDefCtxt,
-                lookupTotal, lookupNameTotal, lookupMetaInformation, lookupTyEnv, isDConName, isTConName, isConName, isFnName,
+                lookupTotal, lookupNameTotal, lookupMetaInformation, lookupTyEnv, isTCDict, isDConName, isTConName, isConName, isFnName,
                 Value(..), Quote(..), initEval, uniqueNameCtxt, uniqueBindersCtxt, definitions,
                 isUniverse) where
 
@@ -24,7 +25,8 @@ import Idris.Core.TT
 import Idris.Core.CaseTree
 
 data EvalState = ES { limited :: [(Name, Int)],
-                      nexthole :: Int }
+                      nexthole :: Int,
+                      blocking :: Bool }
   deriving Show
 
 type Eval a = State EvalState a
@@ -36,7 +38,7 @@ data EvalOpt = Spec
              | RunTT
   deriving (Show, Eq)
 
-initEval = ES [] 0
+initEval = ES [] 0 False
 
 -- VALUES (as HOAS) ---------------------------------------------------------
 -- | A HOAS representation of values
@@ -88,12 +90,17 @@ normaliseTrace tr ctxt env t
    = evalState (do val <- eval tr ctxt [] (map finalEntry env) (finalise t) []
                    quote 0 val) initEval
 
-specialise :: Context -> Env -> [(Name, Int)] -> TT Name -> TT Name
+-- Return a specialised name, and an updated list of reductions available,
+-- so that the caller can tell how much specialisation was achieved.
+specialise :: Context -> Env -> [(Name, Int)] -> TT Name -> 
+              (TT Name, [(Name, Int)])
 specialise ctxt env limits t
-   = evalState (do val <- eval False ctxt []
+   = let (tm, st) =
+          runState (do val <- eval False ctxt []
                                  (map finalEntry env) (finalise t)
                                  [Spec]
-                   quote 0 val) (initEval { limited = limits })
+                       quote 0 val) (initEval { limited = limits }) in
+         (tm, limited st)
 
 -- | Like normalise, but we only reduce functions that are marked as okay to
 -- inline (and probably shouldn't reduce lets?)
@@ -155,11 +162,12 @@ usable :: Bool -- specialising
 -- usable _ _ ns@((MN 0 "STOP", _) : _) = return (False, ns)
 usable False n [] = return (True, [])
 usable True n ns
-  = do ES ls num <- get
-       case lookup n ls of
-            Just 0 -> return (False, ns)
-            Just i -> return (True, ns)
-            _ -> return (False, ns)
+  = do ES ls num b <- get
+       if b then return (False, ns)
+            else case lookup n ls of
+                    Just 0 -> return (False, ns)
+                    Just i -> return (True, ns)
+                    _ -> return (False, ns)
 usable False n ns
   = case lookup n ns of
          Just 0 -> return (False, ns)
@@ -167,12 +175,20 @@ usable False n ns
          _ -> return $ (True, (n, 100) : filter (\ (n', _) -> n/=n') ns)
 
 
-deduct :: Name -> Eval ()
-deduct n = do ES ls num <- get
+fnCount :: Int -> Name -> Eval ()
+fnCount inc n 
+         = do ES ls num b <- get
               case lookup n ls of
-                  Just i -> do put $ ES ((n, (i-1)) :
-                                           filter (\ (n', _) -> n/=n') ls) num
+                  Just i -> do put $ ES ((n, (i - inc)) :
+                                           filter (\ (n', _) -> n/=n') ls) num b
                   _ -> return ()
+
+setBlock :: Bool -> Eval ()
+setBlock b = do ES ls num _ <- get
+                put (ES ls num b)
+
+deduct = fnCount 1
+reinstate = fnCount (-1)
 
 -- | Evaluate in a context of locally named things (i.e. not de Bruijn indexed,
 -- such as we might have during construction of a proof)
@@ -274,10 +290,12 @@ eval traceon ctxt ntimes genv tm opts = ev ntimes [] True [] tm where
                  let ntimes' = case f of
                                     P _ fn _ -> (fn, 0) : ntimes
                                     _ -> ntimes
+                 when spec $ setBlock True
                  d' <- ev ntimes' stk False env d
                  l' <- ev ntimes' stk False env l
                  t' <- ev ntimes' stk False env t
                  arg' <- ev ntimes' stk False env arg
+                 when spec $ setBlock False
                  evApply ntimes' stk top env [l',t',arg'] d'
     -- Treat "assert_total" specially, as long as it's defined!
     ev ntimes stk top env (App (App (P _ n@(UN at) _) _) arg)
@@ -380,8 +398,11 @@ eval traceon ctxt ntimes genv tm opts = ev ntimes [] True [] tm where
         | length ns <= length args
              = do let args' = take (length ns) args
                   let rest  = drop (length ns) args
-                  when spec $ deduct n -- successful, so deduct usages
+                  when spec $ deduct n
                   t <- evTree ntimes stk top env (zip ns args') tree
+                  when spec $ case t of
+                                   Nothing -> reinstate n -- Blocked, count n again
+                                   Just _ -> return () 
 --                                 (zipWith (\n , t) -> (n, t)) ns args') tree
                   return (t, rest)
         | otherwise = return (Nothing, args)
@@ -946,6 +967,15 @@ isFnName n ctxt
                Just (CaseOp _ _ _ _ _ _, _, _, _) -> True
                _ -> False
 
+isTCDict :: Name -> Context -> Bool
+isTCDict n ctxt
+     = let def = lookupCtxtExact n (definitions ctxt) in
+          case def of
+               Just (Function _ _, _, _, _) -> False
+               Just (Operator _ _ _, _, _, _) -> False
+               Just (CaseOp ci _ _ _ _ _, _, _, _) -> tc_dictionary ci
+               _ -> False
+
 lookupP :: Name -> Context -> [Term]
 lookupP n ctxt
    = do def <-  lookupCtxt n (definitions ctxt)
@@ -973,6 +1003,14 @@ lookupDefAcc :: Name -> Bool -> Context ->
                 [(Def, Accessibility)]
 lookupDefAcc n mkpublic ctxt
     = map mkp $ lookupCtxt n (definitions ctxt)
+  -- io_bind a special case for REPL prettiness
+  where mkp (d, a, _, _) = if mkpublic && (not (n == sUN "io_bind" || n == sUN "io_return"))
+                             then (d, Public) else (d, a)
+
+lookupDefAccExact :: Name -> Bool -> Context ->
+                     Maybe (Def, Accessibility)
+lookupDefAccExact n mkpublic ctxt
+    = fmap mkp $ lookupCtxtExact n (definitions ctxt)
   -- io_bind a special case for REPL prettiness
   where mkp (d, a, _, _) = if mkpublic && (not (n == sUN "io_bind" || n == sUN "io_return"))
                              then (d, Public) else (d, a)

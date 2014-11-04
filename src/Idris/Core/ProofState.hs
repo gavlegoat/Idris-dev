@@ -618,8 +618,8 @@ casetac tm induction ctxt env (Bind x (Hole t) (P _ x' _)) | x == x' = do
   (tmv, tmt) <- lift $ check ctxt env tm
   let tmt' = normalise ctxt env tmt
   let (tacn, tacstr, tactt) = if induction
-              then (ElimN, "an eliminator", "induction")
-              else (CaseN, "a case function", "case analysis")
+              then (ElimN, "an eliminator", "Induction")
+              else (CaseN, "a case function", "Case analysis")
   case unApply tmt' of
     (P _ tnm _, tyargs) -> do
         case lookupTy (SN (tacn tnm)) ctxt of
@@ -651,10 +651,10 @@ casetac tm induction ctxt env (Bind x (Hole t) (P _ x' _)) | x == x' = do
              mapM_ addConsHole (reverse consargs')
              let res' = forget $ res
              (scv, sct) <- lift $ check ctxt env res'
-             let scv' = specialise ctxt env [] scv
+             let (scv', _) = specialise ctxt env [] scv
              return scv'
-          [] -> fail $ tactt ++ " needs " ++ tacstr ++ " for " ++ show tnm
-          xs -> fail $ "Multiple definitions found when searching for " ++ tacstr ++ "of " ++ show tnm
+          [] -> lift $ tfail $ Msg $ tactt ++ " needs " ++ tacstr ++ " for " ++ show tnm
+          xs -> lift $ tfail $ Msg $ "Multiple definitions found when searching for " ++ tacstr ++ "of " ++ show tnm
     _ -> fail $ "Unkown type for " ++ if induction then "induction" else "case analysis"
     where scname = sMN 0 "scarg"
           makeConsArg (nm, ty) = P Bound nm ty
@@ -705,7 +705,7 @@ hnf_compute ctxt env t = return t
 -- reduce let bindings only
 simplify :: RunTactic
 simplify ctxt env (Bind x (Hole ty) sc) =
-    do return $ Bind x (Hole (specialise ctxt env [] ty)) sc
+    do return $ Bind x (Hole (fst (specialise ctxt env [] ty))) sc
 simplify ctxt env t = return t
 
 check_in :: Raw -> RunTactic
@@ -815,6 +815,7 @@ updateProblems ctxt ns ps inj holes usupp = up ns ps where
                      (ns', (x',y',env',err', while, um) : ps')
 
 -- attempt to solve remaining problems with match_unify
+-- matchProblems :: Bool -> Elab' aux ()
 matchProblems all ns ctxt ps inj holes = up ns ps where
   up ns [] = (ns, [])
   up ns ((x, y, env, err, while, um) : ps)

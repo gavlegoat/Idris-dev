@@ -1213,6 +1213,8 @@ jsOP _ reg op args = JSAssign (translateReg reg) jsOP'
       , (arg:_)                 <- args = jsCall "parseFloat" [translateReg arg]
       | (LIntFloat ITNative)    <- op
       , (arg:_)                 <- args = translateReg arg
+      | (LIntFloat ITBig)       <- op
+      , (arg:_)                 <- args = jsMeth (translateReg arg) "intValue" []
       | (LFloatInt ITNative)    <- op
       , (arg:_)                 <- args = translateReg arg
       | (LChInt ITNative)       <- op
@@ -1242,6 +1244,8 @@ jsOP _ reg op args = JSAssign (translateReg reg) jsOP'
       , (arg:_)     <- args = jsCall "Math.floor" [translateReg arg]
       | LFCeil      <- op
       , (arg:_)     <- args = jsCall "Math.ceil" [translateReg arg]
+      | LFNegate    <- op
+      , (arg:_)     <- args = JSPreOp "-" (translateReg arg)
 
       | LStrCons    <- op
       , (lhs:rhs:_) <- args = invokeMeth lhs "concat" [rhs]

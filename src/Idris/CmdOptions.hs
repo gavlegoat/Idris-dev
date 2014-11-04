@@ -57,14 +57,14 @@ runArgParser = do opts <- execParser $ info parser
 
 
 pureArgParser :: [String] -> [Opt]
-pureArgParser args = case execParserMaybe (info parser idm) args of
+pureArgParser args = case getParseResult $ execParserPure (prefs idm) (info parser idm) args of
   Just opts -> preProcOpts opts []
   Nothing -> []
 
 parser :: Parser [Opt]
 parser = runA $ proc () -> do
   flags <- asA parseFlags -< ()
-  files <- asA (many $ argument ((fmap . fmap) Filename str) (metavar "FILES")) -< ()
+  files <- asA (many $ argument (fmap Filename str) (metavar "FILES")) -< ()
   A parseVersion >>> A helper -< (flags ++ files)
 
 parseFlags :: Parser [Opt]
@@ -74,13 +74,13 @@ parseFlags = many $
   <|> flag' Ideslave (long "ideslave")
   <|> flag' IdeslaveSocket (long "ideslave-socket")
   <|> (Client <$> strOption (long "client"))
-  <|> (OLogging <$> option (long "log" <> metavar "LEVEL" <> help "Debugging log level"))
+  <|> (OLogging <$> option auto (long "log" <> metavar "LEVEL" <> help "Debugging log level"))
   <|> flag' NoBasePkgs (long "nobasepkgs")
   <|> flag' NoPrelude (long "noprelude")
   <|> flag' NoBuiltins (long "nobuiltins")
   <|> flag' NoREPL (long "check" <> help "Typecheck only, don't start the REPL")
   <|> (Output <$> strOption (short 'o' <> long "output" <> metavar "FILE" <> help "Specify output file"))
-  <|> flag' TypeCase (long "typecase")
+--   <|> flag' TypeCase (long "typecase")
   <|> flag' TypeInType (long "typeintype")
   <|> flag' DefaultTotal (long "total" <> help "Require functions to be total by default")
   <|> flag' DefaultPartial (long "partial")
@@ -96,6 +96,7 @@ parseFlags = many $
   <|> (ImportDir <$> strOption (short 'i' <> long "idrispath" <> help "Add directory to the list of import paths"))
   <|> flag' WarnOnly (long "warn")
   <|> (Pkg <$> strOption (short 'p' <> long "package"))
+  <|> (Port <$> strOption (long "port" <> metavar "PORT" <> help "REPL TCP port"))
   -- Package commands
   <|> (PkgBuild <$> strOption (long "build" <> metavar "IPKG" <> help "Build package"))
   <|> (PkgInstall <$> strOption (long "install" <> metavar "IPKG" <> help "Install package"))
@@ -115,12 +116,14 @@ parseFlags = many $
   <|> (EvalExpr <$> strOption (long "eval" <> short 'e' <> metavar "EXPR" <> help "Evaluate an expression without loading the REPL"))
   <|> flag' (InterpretScript "Main.main") (long "execute" <> help "Execute as idris")
   <|> (InterpretScript <$> strOption (long "exec" <> metavar "EXPR" <> help "Execute as idris"))
-  <|> ((\s -> Extension $ getExt s) <$> strOption (long "extension" <> short 'X' <> metavar "EXT" <> help "Turn on langage extension (TypeProviders or ErrorReflection)"))
+  <|> ((\s -> Extension $ getExt s) <$> strOption (long "extension" <> short 'X' <> metavar "EXT" <> help "Turn on language extension (TypeProviders or ErrorReflection)"))
   <|> flag' (OptLevel 3) (long "O3")
   <|> flag' (OptLevel 2) (long "O2")
   <|> flag' (OptLevel 1) (long "O1")
   <|> flag' (OptLevel 0) (long "O0")
-  <|> (OptLevel <$> option (short 'O' <> long "level"))
+  <|> flag' (AddOpt PETransform) (long "partial-eval")
+  <|> flag' (RemoveOpt PETransform) (long "no-partial-eval")
+  <|> (OptLevel <$> option auto (short 'O' <> long "level"))
   <|> (TargetTriple <$> strOption (long "target" <> metavar "TRIPLE" <> help "Select target triple (for llvm codegen)"))
   <|> (TargetCPU <$> strOption (long "cpu" <> metavar "CPU" <> help "Select target CPU e.g. corei7 or cortex-m3 (for LLVM codegen)"))
   <|> flag' (ColourREPL True) (long "colour" <> long "color" <> help "Force coloured output")
@@ -144,4 +147,3 @@ preProcOpts (x:xs) ys = preProcOpts xs (x:ys)
 parseCodegen :: String -> Codegen
 parseCodegen "bytecode" = Bytecode
 parseCodegen cg = Via (map toLower cg)
-

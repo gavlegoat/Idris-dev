@@ -16,17 +16,18 @@ import Control.Applicative hiding (Const)
 import Control.Monad.State
 import Control.Monad
 import Data.List
+import qualified Data.Traversable as Traversable
 
 import Debug.Trace
 
 import qualified Data.Map as Map
 
-recheckC = recheckC_borrowing [] 
+recheckC = recheckC_borrowing False [] 
 
-recheckC_borrowing bs fc env t
+recheckC_borrowing uniq_check bs fc env t
     = do -- t' <- applyOpts (forget t) (doesn't work, or speed things up...)
          ctxt <- getContext
-         (tm, ty, cs) <- tclift $ case recheck_borrowing bs ctxt env (forget t) t of
+         (tm, ty, cs) <- tclift $ case recheck_borrowing uniq_check bs ctxt env (forget t) t of
                                    Error e -> tfail (At fc e)
                                    OK x -> return x
          addConstraints fc cs
@@ -105,7 +106,7 @@ inferredDiff fc inf user =
 -- | Check a PTerm against documentation and ensure that every documented
 -- argument actually exists.  This must be run _after_ implicits have been
 -- found, or it will give spurious errors.
-checkDocs :: FC -> [(Name, Docstring)] -> PTerm -> Idris ()
+checkDocs :: FC -> [(Name, Docstring a)] -> PTerm -> Idris ()
 checkDocs fc args tm = cd (Map.fromList args) tm
   where cd as (PPi _ n _ sc) = cd (Map.delete n as) sc
         cd as _ | Map.null as = return ()
@@ -233,6 +234,39 @@ getUniqueUsed ctxt tm = execState (getUniq [] [] tm) []
     getUniqB env us (Pi t v) = do getUniq env us t; getUniq env us v
     getUniqB env us (NLet t v) = do getUniq env us t; getUniq env us v
     getUniqB env us b = getUniq env us (binderTy b)
+
+-- In a functional application, return the names which are used
+-- directly in a static position
+getStaticNames :: IState -> Term -> [Name]
+getStaticNames ist (Bind n (PVar _) sc) 
+    = getStaticNames ist (instantiate (P Bound n Erased) sc)
+getStaticNames ist tm 
+    | (P _ fn _, args) <- unApply tm
+        = case lookupCtxtExact fn (idris_statics ist) of
+               Just stpos -> getStatics args stpos
+               _ -> []
+  where
+    getStatics (P _ n _ : as) (True : ss) = n : getStatics as ss
+    getStatics (_ : as) (_ : ss) = getStatics as ss
+    getStatics _ _ = []
+getStaticNames _ _ = []
+
+getStatics :: [Name] -> Term -> [Bool]
+getStatics ns (Bind n (Pi _ _) t)
+    | n `elem` ns = True : getStatics ns t
+    | otherwise = False : getStatics ns t
+getStatics _ _ = []
+
+mkStatic :: [Name] -> PDecl -> PDecl
+mkStatic ns (PTy doc argdocs syn fc o n ty) 
+    = PTy doc argdocs syn fc o n (mkStaticTy ns ty)
+mkStatic ns t = t
+
+mkStaticTy :: [Name] -> PTerm -> PTerm
+mkStaticTy ns (PPi p n ty sc) 
+    | n `elem` ns = PPi (p { pstatic = Static }) n ty (mkStaticTy ns sc)
+    | otherwise = PPi p n ty (mkStaticTy ns sc)
+mkStaticTy ns t = t
 
 
 

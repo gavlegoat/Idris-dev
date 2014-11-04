@@ -8,14 +8,8 @@ import IRTS.Defunctionalise
 import IRTS.Simplified
 import IRTS.CodegenCommon
 import IRTS.CodegenC
-import IRTS.CodegenJava
 import IRTS.DumpBC
 import IRTS.CodegenJavaScript
-#ifdef IDRIS_LLVM
-import IRTS.CodegenLLVM
-#else
-import Util.LLVMStubs
-#endif
 import IRTS.Inliner
 
 import Idris.AbsSyntax
@@ -94,11 +88,10 @@ compile codegen f tm
             Just f -> runIO $ writeFile f (dumpDefuns defuns)
         triple <- Idris.AbsSyntax.targetTriple
         cpu <- Idris.AbsSyntax.targetCPU
-        optimise <- optLevel
         iLOG "Building output"
 
         case checked of
-            OK c -> do return $ CodegenInfo f outty triple cpu optimise
+            OK c -> do return $ CodegenInfo f outty triple cpu 
                                             hdrs impdirs objs libs flags
                                             NONE c (toAlist defuns)
                                             tagged
@@ -127,8 +120,6 @@ generate codegen mainmod ir
   = case codegen of
        -- Built-in code generators (FIXME: lift these out!)
        Via "c" -> codegenC ir 
-       Via "java" -> codegenJava ir 
-       Via "llvm" -> codegenLLVM ir
        -- Any external code generator
        Via cg -> do let cmd = "idris-" ++ cg ++ " " ++ mainmod ++
                               " -o " ++ outputFile ir

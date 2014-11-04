@@ -60,7 +60,7 @@ length (x::xs) = 1 + length xs
 index : (n : Nat) -> (l : List a) -> (ok : lt n (length l) = True) -> a
 index Z     (x::xs) p    = x
 index (S n) (x::xs) p    = index n xs ?indexTailProof
-index _     []      refl   impossible
+index _     []      Refl   impossible
 
 ||| Attempt to find a particular element of a list.
 |||
@@ -73,7 +73,7 @@ index' _     []      = Nothing
 ||| Get the first element of a non-empty list
 ||| @ ok proof that the list is non-empty
 head : (l : List a) -> {auto ok : isCons l = True} -> a
-head []      {ok=refl}   impossible
+head []      {ok=Refl}   impossible
 head (x::xs) {ok=p}    = x
 
 ||| Attempt to get the first element of a list. If the list is empty, return
@@ -85,7 +85,7 @@ head' (x::xs) = Just x
 ||| Get the tail of a non-empty list.
 ||| @ ok proof that the list is non-empty
 tail : (l : List a) -> {auto ok : isCons l = True} -> List a
-tail []      {ok=refl}   impossible
+tail []      {ok=Refl}   impossible
 tail (x::xs) {ok=p}    = xs
 
 ||| Attempt to get the tail of a list.
@@ -98,9 +98,9 @@ tail' (x::xs) = Just xs
 ||| Retrieve the last element of a non-empty list.
 ||| @ ok proof that the list is non-empty
 last : (l : List a) -> {auto ok : isCons l = True} -> a
-last []         {ok=refl}   impossible
+last []         {ok=Refl}   impossible
 last [x]        {ok=p}    = x
-last (x::y::ys) {ok=p}    = last (y::ys) {ok=refl}
+last (x::y::ys) {ok=p}    = last (y::ys) {ok=Refl}
 
 ||| Attempt to retrieve the last element of a non-empty list.
 |||
@@ -115,9 +115,9 @@ last' (x::xs) =
 ||| Return all but the last element of a non-empty list.
 ||| @ ok proof that the list is non-empty
 init : (l : List a) -> {auto ok : isCons l = True} -> List a
-init []         {ok=refl}   impossible
+init []         {ok=Refl}   impossible
 init [x]        {ok=p}    = []
-init (x::y::ys) {ok=p}    = x :: init (y::ys) {ok=refl}
+init (x::y::ys) {ok=p}    = x :: init (y::ys) {ok=Refl}
 
 ||| Attempt to Return all but the last element of a list.
 |||
@@ -157,7 +157,7 @@ drop Z     xs      = xs
 drop (S n) []      = []
 drop (S n) (x::xs) = drop n xs
 
-||| Take the longest prefix of a list such that all elements satsify some
+||| Take the longest prefix of a list such that all elements satisfy some
 ||| Boolean predicate.
 |||
 ||| @ p the predicate
@@ -165,7 +165,7 @@ takeWhile : (p : a -> Bool) -> List a -> List a
 takeWhile p []      = []
 takeWhile p (x::xs) = if p x then x :: takeWhile p xs else []
 
-||| Remove the longest prefix of a list such that all removed elements satsify some
+||| Remove the longest prefix of a list such that all removed elements satisfy some
 ||| Boolean predicate.
 |||
 ||| @ p the predicate
@@ -251,8 +251,8 @@ instance Functor List where
 ||| @ ok a proof that the lengths of the inputs are equal
 zipWith : (f : a -> b -> c) -> (l : List a) -> (r : List b) ->
   (ok : length l = length r) -> List c
-zipWith f []      (y::ys) refl   impossible
-zipWith f (x::xs) []      refl   impossible
+zipWith f []      (y::ys) Refl   impossible
+zipWith f (x::xs) []      Refl   impossible
 zipWith f []      []      p    = []
 zipWith f (x::xs) (y::ys) p    = f x y :: (zipWith f xs ys ?zipWithTailProof)
 
@@ -265,22 +265,22 @@ zipWith f (x::xs) (y::ys) p    = f x y :: (zipWith f xs ys ?zipWithTailProof)
 ||| @ ok' a proof that the lengths of the second and third inputs are equal
 zipWith3 : (f : a -> b -> c -> d) -> (x : List a) -> (y : List b) ->
   (z : List c) -> (ok : length x = length y) -> (ok' : length y = length z) -> List d
-zipWith3 f _       []      (z::zs) p    refl   impossible
-zipWith3 f _       (y::ys) []      p    refl   impossible
-zipWith3 f []      (y::ys) _       refl q      impossible
-zipWith3 f (x::xs) []      _       refl q      impossible
+zipWith3 f _       []      (z::zs) p    Refl   impossible
+zipWith3 f _       (y::ys) []      p    Refl   impossible
+zipWith3 f []      (y::ys) _       Refl q      impossible
+zipWith3 f (x::xs) []      _       Refl q      impossible
 zipWith3 f []      []      []      p    q    = []
 zipWith3 f (x::xs) (y::ys) (z::zs) p    q    =
   f x y z :: (zipWith3 f xs ys zs ?zipWith3TailProof ?zipWith3TailProof')
 
 ||| Combine two lists elementwise into pairs
 zip : (l : List a) -> (r : List b) -> (length l = length r) -> List (a, b)
-zip = zipWith (\x => \y => (x, y))
+zip = zipWith (\x,y => (x, y))
 
 ||| Combine three lists elementwise into tuples
 zip3 : (x : List a) -> (y : List b) -> (z : List c) -> (length x = length y) ->
   (length y = length z) -> List (a, b, c)
-zip3 = zipWith3 (\x => \y => \z => (x, y, z))
+zip3 = zipWith3 (\x,y,z => (x, y, z))
 
 ||| Split a list of pairs into two lists
 unzip : List (a, b) -> (List a, List b)
@@ -340,11 +340,16 @@ reverse = reverse' []
     reverse' acc (x::xs) = reverse' (x::acc) xs
 
 ||| Insert some separator between the elements of a list.
+|||
+||| ````idris example
+||| with List (intersperse ',' ['a', 'b', 'c', 'd', 'e'])
+||| ````
+|||
 intersperse : a -> List a -> List a
 intersperse sep []      = []
 intersperse sep (x::xs) = x :: intersperse' sep xs
   where
---     intersperse' : a -> List a -> List a
+    intersperse' : a -> List a -> List a
     intersperse' sep []      = []
     intersperse' sep (y::ys) = sep :: y :: intersperse' sep ys
 
@@ -353,13 +358,15 @@ intercalate sep l = concat $ intersperse sep l
 
 ||| Transposes rows and columns of a list of lists.
 |||
-|||     > transpose [[1, 2], [3, 4]] = [[1, 3], [2, 4]]
+||| ```idris example
+||| with List transpose [[1, 2], [3, 4]]
+||| ```
 |||
 ||| This also works for non square scenarios, thus
 ||| involution does not always hold:
 |||
-|||     > transpose [[], [1, 2]] = [[1], [2]]
-|||     > transpose (transpose [[], [1, 2]]) = [[1, 2]]
+|||     transpose [[], [1, 2]] = [[1], [2]]
+|||     transpose (transpose [[], [1, 2]]) = [[1, 2]]
 |||
 ||| TODO: Solution which satisfies the totality checker?
 %assert_total
@@ -468,6 +475,12 @@ elemIndices = elemIndicesBy (==)
 -- Filters
 --------------------------------------------------------------------------------
 
+||| filter, applied to a predicate and a list, returns the list of those elements that satisfy the predicate; e.g.,
+|||
+||| ````idris example
+||| filter (< 3) [Z, S Z, S (S Z), S (S (S Z)), S (S (S (S Z)))]
+||| ````
+|||
 filter : (a -> Bool) -> List a -> List a
 filter p []      = []
 filter p (x::xs) =
@@ -476,6 +489,7 @@ filter p (x::xs) =
   else
     filter p xs
 
+||| The nubBy function behaves just like nub, except it uses a user-supplied equality predicate instead of the overloaded == function.
 nubBy : (a -> a -> Bool) -> List a -> List a
 nubBy = nubBy' []
   where
@@ -487,22 +501,53 @@ nubBy = nubBy' []
       else
         x :: nubBy' (x::acc) p xs
 
+||| O(n^2). The nub function removes duplicate elements from a list. In
+||| particular, it keeps only the first occurrence of each element. It is a
+||| special case of nubBy, which allows the programmer to supply their own
+||| equality test.
+|||
+||| ```idris example
+||| nub (the (List _) [1,2,1,3])
+||| ```
 nub : Eq a => List a -> List a
 nub = nubBy (==)
 
+||| The deleteBy function behaves like delete, but takes a user-supplied equality predicate.
 deleteBy : (a -> a -> Bool) -> a -> List a -> List a
 deleteBy _  _ []      = []
 deleteBy eq x (y::ys) = if x `eq` y then ys else y :: deleteBy eq x ys
 
+||| `delete x` removes the first occurrence of `x` from its list argument. For
+||| example,
+|||
+|||````idris example
+|||delete 'a' ['b', 'a', 'n', 'a', 'n', 'a']
+|||````
+|||
+||| It is a special case of deleteBy, which allows the programmer to supply
+||| their own equality test.
 delete : (Eq a) => a -> List a -> List a
 delete = deleteBy (==)
 
+||| The `\\` function is list difference (non-associative). In the result of
+||| `xs \\ ys`, the first occurrence of each element of ys in turn (if any) has
+||| been removed from `xs`, e.g.,
+|||
+||| ```idris example
+||| (([1,2] ++ [2,3]) \\ [1,2])
+||| ```
 (\\) : (Eq a) => List a -> List a -> List a
 (\\) =  foldl (flip delete)
 
 unionBy : (a -> a -> Bool) -> List a -> List a -> List a
 unionBy eq xs ys =  xs ++ foldl (flip (deleteBy eq)) (nubBy eq ys) xs
 
+||| The union function returns the list union of the two lists. For example,
+|||
+||| ```idris example
+||| union ['d', 'o', 'g'] ['c', 'o', 'w']
+||| ```
+|||
 union : (Eq a) => List a -> List a -> List a
 union = unionBy (==)
 
@@ -512,6 +557,10 @@ union = unionBy (==)
 
 ||| Given a list and a predicate, returns a pair consisting of the longest
 ||| prefix of the list that satisfies a predicate and the rest of the list.
+|||
+||| ```idris example
+||| span (<3) [1,2,3,2,1]
+||| ```
 span : (a -> Bool) -> List a -> (List a, List a)
 span p []      = ([], [])
 span p (x::xs) =
@@ -521,9 +570,21 @@ span p (x::xs) =
   else
     ([], x::xs)
 
+||| Given a list and a predicate, returns a pair consisting of the longest
+||| prefix of the list that does not satisfy a predicate and the rest of the
+||| list.
+|||
+||| ```idris example
+||| break (>=3) [1,2,3,2,1]
+||| ```
 break : (a -> Bool) -> List a -> (List a, List a)
 break p = span (not . p)
 
+||| Split on any elements that satisfy the given predicate.
+|||
+||| ```idris example
+||| split (<2) [2,0,3,1,4]
+||| ```
 split : (a -> Bool) -> List a -> List (List a)
 split p xs =
   case break p xs of
@@ -538,6 +599,11 @@ split p xs =
 splitAt : (n : Nat) -> (xs : List a) -> (List a, List a)
 splitAt n xs = (take n xs, drop n xs)
 
+||| The partition function takes a predicate a list and returns the pair of lists of elements which do and do not satisfy the predicate, respectively; e.g.,
+|||
+||| ```idris example
+||| partition (<3) [0, 1, 2, 3, 4, 5]
+||| ```
 partition : (a -> Bool) -> List a -> (List a, List a)
 partition p []      = ([], [])
 partition p (x::xs) =
@@ -547,19 +613,43 @@ partition p (x::xs) =
     else
       (lefts, x::rights)
 
+||| The inits function returns all initial segments of the argument, shortest
+||| first. For example,
+|||
+||| ```idris example
+||| inits [1,2,3]
+||| ```
 inits : List a -> List (List a)
 inits xs = [] :: case xs of
   []        => []
   x :: xs'  => map (x ::) (inits xs')
 
+||| The tails function returns all final segments of the argument, longest
+||| first. For example,
+|||
+||| ```idris example
+||| tails [1,2,3] == [[1,2,3], [2,3], [3], []]
+|||```
 tails : List a -> List (List a)
 tails xs = xs :: case xs of
   []        => []
   _ :: xs'  => tails xs'
 
+||| Split on the given element.
+|||
+||| ```idris example
+||| splitOn 0 [1,0,2,0,0,3]
+||| ```
+|||
 splitOn : Eq a => a -> List a -> List (List a)
 splitOn a = split (== a)
 
+||| Replaces all occurences of the first argument with the second argument in a list.
+|||
+||| ```idris example
+||| replaceOn '-' ',' ['1', '-', '2', '-', '3']
+||| ```
+|||
 replaceOn : Eq a => a -> a -> List a -> List a
 replaceOn a b l = map (\c => if c == a then b else c) l
 
@@ -576,15 +666,26 @@ isPrefixOfBy p (x::xs) (y::ys) =
   else
     False
 
+||| The isPrefixOf function takes two lists and returns True iff the first list is a prefix of the second.
 isPrefixOf : Eq a => List a -> List a -> Bool
 isPrefixOf = isPrefixOfBy (==)
 
 isSuffixOfBy : (a -> a -> Bool) -> List a -> List a -> Bool
 isSuffixOfBy p left right = isPrefixOfBy p (reverse left) (reverse right)
 
+||| The isSuffixOf function takes two lists and returns True iff the first list is a suffix of the second.
 isSuffixOf : Eq a => List a -> List a -> Bool
 isSuffixOf = isSuffixOfBy (==)
 
+||| The isInfixOf function takes two lists and returns True iff the first list is contained, wholly and intact, anywhere within the second.
+|||
+||| ```idris example
+||| isInfixOf ['b','c'] ['a', 'b', 'c', 'd']
+||| ```
+||| ```idris example
+||| isInfixOf ['b','d'] ['a', 'b', 'c', 'd']
+||| ```
+|||
 isInfixOf : Eq a => List a -> List a -> Bool
 isInfixOf n h = any (isPrefixOf n) (tails h)
 
@@ -651,7 +752,7 @@ catMaybes (x::xs) =
 ||| The empty list is a right identity for append.
 appendNilRightNeutral : (l : List a) ->
   l ++ [] = l
-appendNilRightNeutral []      = refl
+appendNilRightNeutral []      = Refl
 appendNilRightNeutral (x::xs) =
   let inductiveHypothesis = appendNilRightNeutral xs in
     ?appendNilRightNeutralStepCase
@@ -659,7 +760,7 @@ appendNilRightNeutral (x::xs) =
 ||| Appending lists is associative.
 appendAssociative : (l : List a) -> (c : List a) -> (r : List a) ->
   l ++ (c ++ r) = (l ++ c) ++ r
-appendAssociative []      c r = refl
+appendAssociative []      c r = Refl
 appendAssociative (x::xs) c r =
   let inductiveHypothesis = appendAssociative xs c r in
     ?appendAssociativeStepCase
@@ -668,7 +769,7 @@ appendAssociative (x::xs) c r =
 ||| of the input lists.
 lengthAppend : (left : List a) -> (right : List a) ->
   length (left ++ right) = length left + length right
-lengthAppend []      right = refl
+lengthAppend []      right = Refl
 lengthAppend (x::xs) right =
   let inductiveHypothesis = lengthAppend xs right in
     ?lengthAppendStepCase
@@ -676,7 +777,7 @@ lengthAppend (x::xs) right =
 ||| Mapping a function over a list doesn't change its length.
 mapPreservesLength : (f : a -> b) -> (l : List a) ->
   length (map f l) = length l
-mapPreservesLength f []      = refl
+mapPreservesLength f []      = Refl
 mapPreservesLength f (x::xs) =
   let inductiveHypothesis = mapPreservesLength f xs in
     ?mapPreservesLengthStepCase
@@ -685,7 +786,7 @@ mapPreservesLength f (x::xs) =
 ||| to appending them and then mapping the function.
 mapDistributesOverAppend : (f : a -> b) -> (l : List a) -> (r : List a) ->
   map f (l ++ r) = map f l ++ map f r
-mapDistributesOverAppend f []      r = refl
+mapDistributesOverAppend f []      r = Refl
 mapDistributesOverAppend f (x::xs) r =
   let inductiveHypothesis = mapDistributesOverAppend f xs r in
     ?mapDistributesOverAppendStepCase
@@ -693,7 +794,7 @@ mapDistributesOverAppend f (x::xs) r =
 ||| Mapping two functions is the same as mapping their composition.
 mapFusion : (f : b -> c) -> (g : a -> b) -> (l : List a) ->
   map f (map g l) = map (f . g) l
-mapFusion f g []      = refl
+mapFusion f g []      = Refl
 mapFusion f g (x::xs) =
   let inductiveHypothesis = mapFusion f g xs in
     ?mapFusionStepCase
@@ -701,7 +802,7 @@ mapFusion f g (x::xs) =
 ||| No list contains an element of the empty list by any predicate.
 hasAnyByNilFalse : (p : a -> a -> Bool) -> (l : List a) ->
   hasAnyBy p [] l = False
-hasAnyByNilFalse p []      = refl
+hasAnyByNilFalse p []      = Refl
 hasAnyByNilFalse p (x::xs) =
   let inductiveHypothesis = hasAnyByNilFalse p xs in
     ?hasAnyByNilFalseStepCase

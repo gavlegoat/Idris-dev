@@ -37,17 +37,21 @@ import Paths_idris
 -- Main program reads command line options, parses the main program, and gets
 -- on with the REPL.
 
+main :: IO ()
 main = do opts <- runArgParser
           runMain (runIdris opts)
 
 runIdris :: [Opt] -> Idris ()
-runIdris [Client c] = do setVerbose False
-                         setQuiet True
-                         runIO $ runClient c
 runIdris opts = do
        when (ShowIncs `elem` opts) $ runIO showIncs
        when (ShowLibs `elem` opts) $ runIO showLibs
        when (ShowLibdir `elem` opts) $ runIO showLibdir
+       case opt getClient opts of
+           []    -> return ()
+           (c:_) -> do setVerbose False
+                       setQuiet True
+                       runIO $ runClient (getPort opts) c
+                       runIO $ exitWith ExitSuccess
        case opt getPkgCheck opts of
            [] -> return ()
            fs -> do runIO $ mapM_ (checkPkg (WarnOnly `elem` opts) True) fs
@@ -71,17 +75,21 @@ runIdris opts = do
                       _ -> ifail "Too many packages"
            fs -> runIO $ mapM_ (buildPkg (WarnOnly `elem` opts)) fs
 
+showver :: IO b
 showver = do putStrLn $ "Idris version " ++ ver
              exitWith ExitSuccess
 
+showLibs :: IO b
 showLibs = do libFlags <- getLibFlags
               putStrLn libFlags
               exitWith ExitSuccess
 
+showLibdir :: IO b
 showLibdir = do dir <- getIdrisLibDir
                 putStrLn dir
                 exitWith ExitSuccess
 
+showIncs :: IO b
 showIncs = do incFlags <- getIncFlags
               putStrLn incFlags
               exitWith ExitSuccess

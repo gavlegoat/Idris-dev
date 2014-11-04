@@ -17,10 +17,11 @@ import Util.DynamicLinker
 import System.Console.Haskeline
 import System.IO
 
+import Control.Applicative
 import Control.Monad.State
 import Control.Monad.Error(throwError)
 
-import Data.List
+import Data.List hiding (insert,union)
 import Data.Char
 import qualified Data.Text as T
 import Data.Either
@@ -110,9 +111,16 @@ addLangExt ErrorReflection = do i <- getIState
                                   idris_language_extensions = ErrorReflection : idris_language_extensions i
                                 }
 
-addTrans :: (Term, Term) -> Idris ()
-addTrans t = do i <- getIState
-                putIState $ i { idris_transforms = t : idris_transforms i }
+-- Transforms are organised by the function being applied on the lhs of the
+-- transform, to make looking up appropriate transforms quicker
+addTrans :: Name -> (Term, Term) -> Idris ()
+addTrans basefn t 
+           = do i <- getIState
+                let t' = case lookupCtxtExact basefn (idris_transforms i) of
+                              Just def -> (t : def)
+                              Nothing -> [t]
+                putIState $ i { idris_transforms = addDef basefn t' 
+                                                          (idris_transforms i) }
 
 addErrRev :: (Term, Term) -> Idris ()
 addErrRev t = do i <- getIState
@@ -278,7 +286,7 @@ addCoercion :: Name -> Idris ()
 addCoercion n = do i <- getIState
                    putIState $ i { idris_coercions = nub $ n : idris_coercions i }
 
-addDocStr :: Name -> Docstring -> [(Name, Docstring)] -> Idris ()
+addDocStr :: Name -> Docstring DocTerm -> [(Name, Docstring DocTerm)] -> Idris ()
 addDocStr n doc args
    = do i <- getIState
         putIState $ i { idris_docstrings = addDef n (doc, args) (idris_docstrings i) }
@@ -490,7 +498,7 @@ addDeferredTyCon = addDeferred' (TCon 0 0)
 
 addDeferred' :: NameType -> [(Name, (Int, Maybe Name, Type, Bool))] -> Idris ()
 addDeferred' nt ns
-  = do mapM_ (\(n, (i, _, t, _)) -> updateContext (addTyDecl n nt (tidyNames [] t))) ns
+  = do mapM_ (\(n, (i, _, t, _)) -> updateContext (addTyDecl n nt (tidyNames S.empty t))) ns
        mapM_ (\(n, _) -> when (not (n `elem` primDefs)) $ addIBC (IBCMetavar n)) ns
        i <- getIState
        putIState $ i { idris_metavars = map (\(n, (i, top, _, isTopLevel)) -> (n, (top, i, isTopLevel))) ns ++
@@ -499,11 +507,11 @@ addDeferred' nt ns
         -- 'tidyNames' is to generate user accessible names in case they are
         -- needed in tactic scripts
         tidyNames used (Bind (MN i x) b sc)
-            = let n' = uniqueName (UN x) used in
-                  Bind n' b $ tidyNames (n':used) sc
+            = let n' = uniqueNameSet (UN x) used in
+                  Bind n' b $ tidyNames (S.insert n' used) sc
         tidyNames used (Bind n b sc)
-            = let n' = uniqueName n used in
-                  Bind n' b $ tidyNames (n':used) sc
+            = let n' = uniqueNameSet n used in
+                  Bind n' b $ tidyNames (S.insert n' used) sc
         tidyNames used b = b
 
 solveDeferred :: Name -> Idris ()
@@ -600,12 +608,38 @@ logLevel = do i <- getIState
 setErrContext :: Bool -> Idris ()
 setErrContext t = do i <- getIState
                      let opts = idris_options i
-                     let opt' = opts { opt_errContext = t }
-                     putIState $ i { idris_options = opt' }
+                     let opts' = opts { opt_errContext = t }
+                     putIState $ i { idris_options = opts' }
 
 errContext :: Idris Bool
 errContext = do i <- getIState
                 return (opt_errContext (idris_options i))
+
+getOptimise :: Idris [Optimisation]
+getOptimise = do i <- getIState
+                 return (opt_optimise (idris_options i))
+
+setOptimise :: [Optimisation] -> Idris ()
+setOptimise newopts = do i <- getIState
+                         let opts = idris_options i
+                         let opts' = opts { opt_optimise = newopts }
+                         putIState $ i { idris_options = opts' }
+
+addOptimise :: Optimisation -> Idris ()
+addOptimise opt = do opts <- getOptimise
+                     setOptimise (nub (opt : opts))
+
+removeOptimise :: Optimisation -> Idris ()
+removeOptimise opt = do opts <- getOptimise
+                        setOptimise ((nub opts) \\ [opt])
+
+-- Set appropriate optimisation set for the given level. We only have
+-- one optimisation that is configurable at the moment, however!
+setOptLevel :: Int -> Idris ()
+setOptLevel n | n <= 0 = setOptimise []
+setOptLevel 1          = setOptimise []
+setOptLevel 2          = setOptimise [PETransform]
+setOptLevel n | n >= 3 = setOptimise [PETransform]
 
 useREPL :: Idris Bool
 useREPL = do i <- getIState
@@ -699,16 +733,6 @@ setTargetCPU t = do i <- getIState
 targetCPU :: Idris String
 targetCPU = do i <- getIState
                return (opt_cpu (idris_options i))
-
-setOptLevel :: Word -> Idris ()
-setOptLevel t = do i <- getIState
-                   let opts = idris_options i
-                       opt' = opts { opt_optLevel = t }
-                   putIState $ i { idris_options = opt' }
-
-optLevel :: Idris Word
-optLevel = do i <- getIState
-              return (opt_optLevel (idris_options i))
 
 verbose :: Idris Bool
 verbose = do i <- getIState
@@ -1032,7 +1056,6 @@ getPriority i tm = 1 -- pri tm
             [] -> 0 -- must be locally bound, if it's not an error...
     pri (PPi _ _ x y) = max 5 (max (pri x) (pri y))
     pri (PTrue _ _) = 0
-    pri (PFalse _) = 0
     pri (PRefl _ _) = 1
     pri (PEq _ _ _ l r) = max 1 (max (pri l) (pri r))
     pri (PRewrite _ l r _) = max 1 (max (pri l) (pri r))
@@ -1051,21 +1074,36 @@ getPriority i tm = 1 -- pri tm
 addStatics :: Name -> Term -> PTerm -> Idris ()
 addStatics n tm ptm =
     do let (statics, dynamics) = initStatics tm ptm
+       ist <- getIState
+       let paramnames 
+              = nub $ case lookupCtxtExact n (idris_fninfo ist) of
+                           Just p -> getNamesFrom 0 (fn_params p) tm ++
+                                     concatMap (getParamNames ist) (map snd statics)
+                           _ -> concatMap (getParamNames ist) (map snd statics)
+        
        let stnames = nub $ concatMap freeArgNames (map snd statics)
-       let dnames = nub $ concatMap freeArgNames (map snd dynamics)
+       let dnames = (nub $ concatMap freeArgNames (map snd dynamics))
+                             \\ paramnames
        -- also get the arguments which are 'uniquely inferrable' from
        -- statics (see sec 4.2 of "Scrapping Your Inefficient Engine")
+       -- or parameters to the type of a static
        let statics' = nub $ map fst statics ++
                               filter (\x -> not (elem x dnames)) stnames
        let stpos = staticList statics' tm
        i <- getIState
        when (not (null statics)) $
-          logLvl 5 $ show n ++ " " ++ show statics' ++ "\n" ++ show dynamics
-                        ++ "\n" ++ show stnames ++ "\n" ++ show dnames
+          logLvl 3 $ "Statics for " ++ show n ++ " " ++ show tm ++ "\n"
+                        ++ showTmImpls ptm ++ "\n"
+                        ++ show statics ++ "\n" ++ show dynamics
+                        ++ "\n" ++ show paramnames
+                        ++ "\n" ++ show stpos
        putIState $ i { idris_statics = addDef n stpos (idris_statics i) }
        addIBC (IBCStatic n)
   where
-    initStatics (Bind n (Pi ty _) sc) (PPi p _ _ s)
+    initStatics (Bind n (Pi ty _) sc) (PPi p n' t s)
+            | n /= n' = let (static, dynamic) = initStatics sc (PPi p n' t s) in
+                            (static, (n, ty) : dynamic)
+    initStatics (Bind n (Pi ty _) sc) (PPi p n' _ s)
             = let (static, dynamic) = initStatics (instantiate (P Bound n ty) sc) s in
                   if pstatic p == Static then ((n, ty) : static, dynamic)
                     else if (not (searchArg p)) 
@@ -1073,8 +1111,25 @@ addStatics n tm ptm =
                             else (static, dynamic)
     initStatics t pt = ([], [])
 
+    getParamNames ist tm | (P _ n _ , args) <- unApply tm
+       = case lookupCtxtExact n (idris_datatypes ist) of
+              Just ti -> getNamePos 0 (param_pos ti) args
+              Nothing -> []
+      where getNamePos i ps [] = []
+            getNamePos i ps (P _ n _ : as) 
+                 | i `elem` ps = n : getNamePos (i + 1) ps as
+            getNamePos i ps (_ : as) = getNamePos (i + 1) ps as
+    getParamNames ist (Bind t (Pi (P _ n _) _) sc)
+       = n : getParamNames ist sc
+    getParamNames ist _ = []
+
+    getNamesFrom i ps (Bind n (Pi _ _) sc)
+       | i `elem` ps = n : getNamesFrom (i + 1) ps sc
+       | otherwise = getNamesFrom (i + 1) ps sc
+    getNamesFrom i ps sc = []
+
     freeArgNames (Bind n (Pi ty _) sc) 
-          = nub $ freeArgNames ty 
+          = nub $ freeNames ty ++ freeNames sc -- treat '->' as fn here
     freeArgNames tm = let (_, args) = unApply tm in
                           concatMap freeNames args
 
@@ -1663,7 +1718,11 @@ findStatics ist tm = trace (show tm) $
         pos ns ss t = return t
 
 -- for 6.12/7 compatibility
-data EitherErr a b = LeftErr a | RightOK b
+data EitherErr a b = LeftErr a | RightOK b deriving ( Functor )
+
+instance Applicative (EitherErr a) where
+    pure  = return
+    (<*>) = ap
 
 instance Monad (EitherErr a) where
     return = RightOK
@@ -1755,7 +1814,6 @@ matchClause' names i x y = checkRpts $ match (fullApp x) (fullApp y) where
     match (PRefl _ _) (PRefl _ _) = return []
     match (PResolveTC _) (PResolveTC _) = return []
     match (PTrue _ _) (PTrue _ _) = return []
-    match (PFalse _) (PFalse _) = return []
     match (PReturn _) (PReturn _) = return []
     match (PPi _ _ t s) (PPi _ _ t' s') = do mt <- match' t t'
                                              ms <- match' s s'
@@ -1851,8 +1909,9 @@ shadow n n' t = sm t where
 -- about with shadowing anywhere else).
 
 mkUniqueNames :: [Name] -> PTerm -> PTerm
-mkUniqueNames env tm = evalState (mkUniq tm) env where
-  inScope = boundNamesIn tm
+mkUniqueNames env tm = evalState (mkUniq tm) (S.fromList env) where
+  inScope :: S.Set Name
+  inScope = S.fromList $ boundNamesIn tm
 
   mkUniqA arg = do t' <- mkUniq (getTm arg)
                    return (arg { getTm = t' })
@@ -1867,40 +1926,40 @@ mkUniqueNames env tm = evalState (mkUniq tm) env where
   -- long as there are no bindings inside tactics though.
   mkUniqT tac = return tac
 
-  mkUniq :: PTerm -> State [Name] PTerm
+  mkUniq :: PTerm -> State (S.Set Name) PTerm
   mkUniq (PLam n ty sc)
          = do env <- get
               (n', sc') <-
-                    if n `elem` env
-                       then do let n' = uniqueName (initN n (length env))
-                                                   (env ++ inScope)
+                    if n `S.member` env
+                       then do let n' = uniqueNameSet (initN n (S.size env))
+                                                      (S.union env inScope)
                                return (n', shadow n n' sc)
                        else return (n, sc)
-              put (n' : env)
+              put (S.insert n' env)
               ty' <- mkUniq ty
               sc'' <- mkUniq sc'
               return $! PLam n' ty' sc''
   mkUniq (PPi p n ty sc)
          = do env <- get
               (n', sc') <-
-                    if n `elem` env
-                       then do let n' = uniqueName (initN n (length env))
-                                                   (env ++ inScope)
+                    if n `S.member` env
+                       then do let n' = uniqueNameSet (initN n (S.size env))
+                                                      (S.union env inScope)
                                return (n', shadow n n' sc)
                        else return (n, sc)
-              put (n' : env)
+              put (S.insert n' env)
               ty' <- mkUniq ty
               sc'' <- mkUniq sc'
               return $! PPi p n' ty' sc''
   mkUniq (PLet n ty val sc)
          = do env <- get
               (n', sc') <-
-                    if n `elem` env
-                       then do let n' = uniqueName (initN n (length env))
-                                                   (env ++ inScope)
+                    if n `S.member` env
+                       then do let n' = uniqueNameSet (initN n (S.size env))
+                                                      (S.union env inScope)
                                return (n', shadow n n' sc)
                        else return (n, sc)
-              put (n' : env)
+              put (S.insert n' env)
               ty' <- mkUniq ty; val' <- mkUniq val
               sc'' <- mkUniq sc'
               return $! PLet n' ty' val' sc''
@@ -1923,11 +1982,11 @@ mkUniqueNames env tm = evalState (mkUniq tm) env where
   mkUniq (PDPair fc p (PRef fc' n) t sc)
       | t /= Placeholder
          = do env <- get
-              (n', sc') <- if n `elem` env
-                              then do let n' = uniqueName n (env ++ inScope)
+              (n', sc') <- if n `S.member` env
+                              then do let n' = uniqueNameSet n (S.union env inScope)
                                       return (n', shadow n n' sc)
                               else return (n, sc)
-              put (n' : env)
+              put (S.insert n' env)
               t' <- mkUniq t
               sc'' <- mkUniq sc'
               return $! PDPair fc p (PRef fc' n') t' sc''

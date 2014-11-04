@@ -14,11 +14,13 @@ import Idris.Providers
 import Idris.Primitives
 import Idris.Inliner
 import Idris.PartialEval
+import Idris.Transforms
 import Idris.DeepSeq
-import Idris.Output (iputStrLn, pshow, iWarn)
+import Idris.Output (iputStrLn, pshow, iWarn, iRenderResult)
 import IRTS.Lang
 
 import Idris.Elab.Type
+import Idris.Elab.Transform
 import Idris.Elab.Utils
 
 import Idris.Core.TT
@@ -28,7 +30,8 @@ import Idris.Core.Execute
 import Idris.Core.Typecheck
 import Idris.Core.CaseTree
 
-import Idris.Docstrings
+import Idris.Docstrings hiding (Unchecked)
+import Util.Pretty hiding ((<$>))
 
 import Prelude hiding (id, (.))
 import Control.Category
@@ -48,6 +51,7 @@ import Data.Char(isLetter, toLower)
 import Data.List.Split (splitOn)
 
 import Util.Pretty(pretty, text)
+import Numeric
 
 -- | Elaborate a collection of left-hand and right-hand pairs - that is, a
 -- top-level definition.
@@ -55,6 +59,8 @@ elabClauses :: ElabInfo -> FC -> FnOpts -> Name -> [PClause] -> Idris ()
 elabClauses info fc opts n_in cs = let n = liftname info n_in in
       do ctxt <- getContext
          ist  <- getIState
+         optimise <- getOptimise
+         let petrans = PETransform `elem` optimise
          inacc <- map fst <$> fgetState (opt_inaccessible . ist_optimisation n)
 
          -- Check n actually exists, with no definition yet
@@ -70,9 +76,11 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
            let atys = map snd (getArgTys fty)
            cs_elab <- mapM (elabClause info opts)
                            (zip [0..] cs)
+           -- pats_raw is the version we'll work with at compile time:
+           -- no simplification or PE
            let (pats_in, cs_full) = unzip cs_elab
-
-           logLvl 3 $ "Elaborated patterns:\n" ++ show pats_in
+           let pats_raw = map (simple_lhs (tt_ctxt ist)) pats_in
+           logLvl 3 $ "Elaborated patterns:\n" ++ show pats_raw
 
            solveDeferred n
 
@@ -81,12 +89,37 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
            addIBC (IBCOpt n)
 
            ist <- getIState
-           let pats = map (simple_lhs (tt_ctxt ist)) $ doTransforms ist pats_in
+           -- Don't apply rules if this is a partial evaluation definition,
+           -- or we'll make something that just runs itself!
+           let tpats = case specNames opts of
+                            Nothing -> transformPats ist pats_in
+                            _ -> pats_in
 
-  --          logLvl 3 (showSep "\n" (map (\ (l,r) ->
-  --                                         show l ++ " = " ++
-  --                                         show r) pats))
+           -- If the definition is specialisable, this reduces the
+           -- RHS
+           pe_tm <- doPartialEval ist tpats
+           let pats_pe = if petrans 
+                            then map (simple_lhs (tt_ctxt ist)) pe_tm
+                            else pats_raw
+
            let tcase = opt_typecase (idris_options ist)
+
+           -- Look for 'static' names and generate new specialised
+           -- definitions for them, as well as generating rewrite rules
+           -- for partially evaluated definitions
+           newrules <- if petrans 
+                          then mapM (\ e -> case e of
+                                            Left _ -> return []
+                                            Right (l, r) -> elabPE info fc n r) pats_pe
+                          else return []
+
+           -- Redo transforms with the newly generated transformations, so
+           -- that the specialised application we've just made gets
+           -- used in place of the general one
+           ist <- getIState
+           let pats_transformed = if petrans
+                                     then transformPats ist pats_pe
+                                     else pats_pe
 
            -- Summary of what's about to happen: Definitions go:
            --
@@ -95,19 +128,14 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
            -- addCaseDef builds case trees from <pdef> and <pdef'>
 
            -- pdef is the compile-time pattern definition.
-           -- This will get further optimised for run-time, and, separately,
-           -- further inlined to help with totality checking.
-           let pdef = map debind pats
+           -- This will get further inlined to help with totality checking.
+           let pdef = map debind pats_raw
+           -- pdef_pe is the one which will get further optimised 
+           -- for run-time, and, partially evaluated
+           let pdef_pe = map debind pats_transformed
 
-           logLvl 5 $ "Initial typechecked patterns:\n" ++ show pats
+           logLvl 5 $ "Initial typechecked patterns:\n" ++ show pats_raw
            logLvl 5 $ "Initial typechecked pattern def:\n" ++ show pdef
-
-           -- Look for 'static' names and generate new specialised
-           -- definitions for them
-
-           mapM_ (\ e -> case e of
-                           Left _ -> return ()
-                           Right (l, r) -> elabPE info fc n r) pats
 
            -- NOTE: Need to store original definition so that proofs which
            -- rely on its structure aren't affected by any changes to the
@@ -120,12 +148,14 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
            numArgs <- tclift $ sameLength pdef
 
            case specNames opts of
-                Just _ -> logLvl 5 $ "Partially evaluated:\n" ++ show pats
+                Just _ -> 
+                   do logLvl 3 $ "Partially evaluated:\n" ++ show pats_pe
                 _ -> return ()
+           logLvl 3 $ "Transformed:\n" ++ show pats_transformed
 
            erInfo <- getErasureInfo <$> getIState
            tree@(CaseDef scargs sc _) <- tclift $
-                   simpleCase tcase False reflect CompileTime fc inacc atys pdef erInfo
+                 simpleCase tcase False reflect CompileTime fc inacc atys pdef erInfo
            cov <- coverage
            pmissing <-
                    if cov && not (hasDefault cs)
@@ -146,8 +176,9 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
                       else return []
            let pcover = null pmissing
 
-           -- pdef' is the version that gets compiled for run-time
-           pdef_in' <- applyOpts pdef
+           -- pdef' is the version that gets compiled for run-time,
+           -- so we start from the partially evaluated version
+           pdef_in' <- applyOpts pdef_pe
            let pdef' = map (simple_rt (tt_ctxt ist)) pdef_in'
 
            logLvl 5 $ "After data structure transformations:\n" ++ show pdef'
@@ -163,7 +194,6 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
   --                       then case tot of
   --                               Total _ -> return ()
   --                               t -> tclift $ tfail (At fc (Msg (show n ++ " is " ++ show t)))
-  --                       else return ()
   --             _ -> return ()
            case tree of
                CaseDef _ _ [] -> return ()
@@ -180,7 +210,7 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
            ctxt <- getContext
            ist <- getIState
            let opt = idris_optimisation ist
-           putIState (ist { idris_patdefs = addDef n (force pdef', force pmissing)
+           putIState (ist { idris_patdefs = addDef n (force pdef_pe, force pmissing)
                                                 (idris_patdefs ist) })
            let caseInfo = CaseInfo (inlinable opts) (dictionary opts)
            case lookupTy n ctxt of
@@ -190,8 +220,11 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
                                                        (AssertTotal `elem` opts)
                                                        atys
                                                        inacc
-                                                       pats
-                                                       pdef pdef pdef_inl pdef' ty)
+                                                       pats_pe
+                                                       pdef 
+                                                       pdef -- compile time 
+                                                       pdef_inl -- inlined
+                                                       pdef' ty)
                           addIBC (IBCDef n)
                           setTotality n tot
                           when (not reflect) $ do totcheck (fc, n)
@@ -244,21 +277,11 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
 
     getLHS (_, l, _) = l
 
-    simple_lhs ctxt (Right (x, y)) = Right (normalise ctxt [] x, 
-                                            force (normalisePats ctxt [] y))
+    simple_lhs ctxt (Right (x, y)) = Right (normalise ctxt [] x, y)
     simple_lhs ctxt t = t
 
     simple_rt ctxt (p, x, y) = (p, x, force (uniqueBinders p
                                                 (rt_simplify ctxt [] y)))
-
-    -- this is so pattern types are in the right form for erasure
-    normalisePats ctxt env (Bind n (PVar t) sc) 
-       = let t' = normalise ctxt env t in
-             Bind n (PVar t') (normalisePats ctxt ((n, PVar t') : env) sc)
-    normalisePats ctxt env (Bind n (PVTy t) sc) 
-       = let t' = normalise ctxt env t in
-             Bind n (PVTy t') (normalisePats ctxt ((n, PVar t') : env) sc)
-    normalisePats ctxt env t = t
 
     specNames [] = Nothing
     specNames (Specialise ns : _) = Just ns
@@ -271,62 +294,99 @@ elabClauses info fc opts n_in cs = let n = liftname info n_in in
                 else tfail (At fc (Msg "Clauses have differing numbers of arguments "))
     sameLength [] = return 0
 
-    -- apply all transformations (just specialisation for now, add
-    -- user defined transformation rules later)
-    doTransforms ist pats =
+    -- Partially evaluate, if the definition is marked as specialisable
+    doPartialEval ist pats =
            case specNames opts of
-                Nothing -> pats
-                Just ns -> partial_eval (tt_ctxt ist) ns pats
+                Nothing -> return pats
+                Just ns -> case partial_eval (tt_ctxt ist) ns pats of
+                                Just t -> return t
+                                Nothing -> ierror (At fc (Msg "No specialisation achieved"))
 
--- | Find 'static' applications in a term and partially evaluate them
-elabPE :: ElabInfo -> FC -> Name -> Term -> Idris ()
+-- | Find 'static' applications in a term and partially evaluate them.
+-- Return any new transformation rules
+elabPE :: ElabInfo -> FC -> Name -> Term -> Idris [(Term, Term)]
 elabPE info fc caller r =
   do ist <- getIState
-     let sa = getSpecApps ist [] r
-     mapM_ (mkSpecialised ist) sa
-  where 
-    -- TODO: Add a PTerm level transformation rule, which is basically the 
-    -- new definition in reverse (before specialising it). 
-    -- RHS => LHS where implicit arguments are left blank in the 
+     let sa = filter (\ap -> fst ap /= caller) $ getSpecApps ist [] r
+     rules <- mapM mkSpecialised sa
+     return $ concat rules
+  where
+    -- Make a specialised version of the application, and
+    -- add a PTerm level transformation rule, which is basically the
+    -- new definition in reverse (before specialising it).
+    -- RHS => LHS where implicit arguments are left blank in the
     -- transformation.
 
-    -- Apply that transformation after every PClauses elaboration
+    -- Transformation rules are applied after every PClause elaboration
 
-    mkSpecialised ist specapp_in = do
+    mkSpecialised :: (Name, [(PEArgType, Term)]) -> Idris [(Term, Term)]
+    mkSpecialised specapp_in = do
+        ist <- getIState
         let (specTy, specapp) = getSpecTy ist specapp_in
-        let (n, newnm, pats) = getSpecClause ist specapp
-        let undef = case lookupDef newnm (tt_ctxt ist) of
-                         [] -> True
+        let (n, newnm, specdecl) = getSpecClause ist specapp
+        let lhs = pe_app specdecl
+        let rhs = pe_def specdecl
+        let undef = case lookupDefExact newnm (tt_ctxt ist) of
+                         Nothing -> True
                          _ -> False
-        logLvl 5 $ show (newnm, map (concreteArg ist) (snd specapp))
+        logLvl 5 $ show (newnm, undef, map (concreteArg ist) (snd specapp))
         idrisCatch
-          (when (undef && all (concreteArg ist) (snd specapp)) $ do
-            cgns <- getAllNames n
-            let opts = [Specialise (map (\x -> (x, Nothing)) cgns ++ 
-                                     mapMaybe specName (snd specapp))]
-            logLvl 3 $ "Specialising application: " ++ show specapp
-            logLvl 2 $ "New name: " ++ show newnm
-            iLOG $ "PE definition type : " ++ (show specTy)
-                        ++ "\n" ++ show opts
-            logLvl 2 $ "PE definition " ++ show newnm ++ ":\n" ++
-                        showSep "\n" 
-                           (map (\ (lhs, rhs) ->
-                              (showTmImpls lhs ++ " = " ++ 
-                               showTmImpls rhs)) pats)
-            elabType info defaultSyntax emptyDocstring [] fc opts newnm specTy
-            let def = map (\ (lhs, rhs) -> PClause fc newnm lhs [] rhs []) pats
-            elabClauses info fc opts newnm def
-            logLvl 2 $ "Specialised " ++ show newnm)
+          (if (undef && all (concreteArg ist) (snd specapp)) then do
+                cgns <- getAllNames n
+                -- on the RHS of the new definition, we should reduce
+                -- everything that's not itself static (because we'll
+                -- want to be a PE version of those next)
+                let cgns' = filter (\x -> x /= n &&
+                                          notStatic ist x) cgns
+                -- set small reduction limit on partial/productive things
+                let maxred = case lookupTotal n (tt_ctxt ist) of
+                                  [Total _] -> 65536
+                                  [Productive] -> 16
+                                  _ -> 1
+                let opts = [Specialise ((if pe_simple specdecl 
+                                            then map (\x -> (x, Nothing)) cgns' 
+                                            else []) ++
+                                         (n, Just maxred) : 
+                                           mapMaybe (specName (pe_simple specdecl))
+                                                    (snd specapp))]
+                logLvl 3 $ "Specialising application: " ++ show specapp
+                              ++ " in " ++ show caller ++
+                              " with " ++ show opts
+                logLvl 3 $ "New name: " ++ show newnm
+                logLvl 3 $ "PE definition type : " ++ (show specTy)
+                            ++ "\n" ++ show opts
+                logLvl 3 $ "PE definition " ++ show newnm ++ ":\n" ++
+                             showSep "\n"
+                                (map (\ (lhs, rhs) ->
+                                  (show lhs ++ " = " ++
+                                   showTmImpls rhs)) (pe_clauses specdecl))
+
+                logLvl 2 $ show n ++ " transformation rule: " ++
+                           show rhs ++ " ==> " ++ show lhs
+
+                elabType info defaultSyntax emptyDocstring [] fc opts newnm specTy
+                let def = map (\(lhs, rhs) ->
+                                  PClause fc newnm lhs [] rhs []) 
+                              (pe_clauses specdecl)    
+                trans <- elabTransform info fc False rhs lhs
+                elabClauses info fc opts newnm def
+                return [trans]
+             else return [])
           -- if it doesn't work, just don't specialise. Could happen for lots
           -- of valid reasons (e.g. local variables in scope which can't be
           -- lifted out).
-          (\e -> logLvl 4 $ "Couldn't specialise: " ++ (pshow ist e)) 
+          (\e -> do logLvl 3 $ "Couldn't specialise: " ++ (pshow ist e)
+                    return [])
 
-    specName (ImplicitS, tm) 
-        | (P Ref n _, _) <- unApply tm = Just (n, Just 1)
-    specName (ExplicitS, tm)
-        | (P Ref n _, _) <- unApply tm = Just (n, Just 1)
-    specName _ = Nothing
+    specName simpl (ImplicitS, tm)
+        | (P Ref n _, _) <- unApply tm = Just (n, Just (if simpl then 1 else 0))
+    specName simpl (ExplicitS, tm)
+        | (P Ref n _, _) <- unApply tm = Just (n, Just (if simpl then 1 else 0))
+    specName simpl _ = Nothing
+
+    notStatic ist n = case lookupCtxtExact n (idris_statics ist) of
+                           Just s -> not (or s)
+                           _ -> True
 
     concreteArg ist (ImplicitS, tm) = concreteTm ist tm
     concreteArg ist (ExplicitS, tm) = concreteTm ist tm
@@ -337,6 +397,8 @@ elabPE info fc caller r =
              [] -> False
              _ -> True
     concreteTm ist (Constant _) = True
+    concreteTm ist (Bind n (Lam _) sc) = True
+    concreteTm ist (Bind n (Let _ _) sc) = concreteTm ist sc
     concreteTm ist _ = False
 
     -- get the type of a specialised application
@@ -351,13 +413,25 @@ elabPE info fc caller r =
 
     -- get the clause of a specialised application
     getSpecClause ist (n, args)
-       = let newnm = sUN ("__"++show (nsroot n) ++ "_" ++ 
-                               showSep "_" (map showArg args)) in 
+       = let newnm = sUN ("PE_" ++ show (nsroot n) ++ "_" ++
+                               qhash 5381 (showSep "_" (map showArg args))) in 
                                -- UN (show n ++ show (map snd args)) in
              (n, newnm, mkPE_TermDecl ist newnm n args)
-      where showArg (ExplicitS, n) = show n
-            showArg (ImplicitS, n) = show n
+      where showArg (ExplicitS, n) = qshow n
+            showArg (ImplicitS, n) = qshow n
             showArg _ = ""
+
+            qshow (Bind _ _ _) = "fn"
+            qshow (App f a) = qshow f ++ qshow a
+            qshow (P _ n _) = show n
+            qshow (Constant c) = show c
+            qshow _ = ""
+
+            -- Simple but effective string hashing...
+            -- Keep it to 32 bits for readability/debuggability
+            qhash :: Int -> String -> String
+            qhash hash [] = showHex (abs hash `mod` 0xffffffff) ""
+            qhash hash (x:xs) = qhash (hash * 33 + fromEnum x) xs
 
 -- checks if the clause is a possible left hand side. Returns the term if
 -- possible, otherwise Nothing.
@@ -388,8 +462,8 @@ checkPossible info fc tcgen fname lhs_in
           validCase ctxt (Elaborating _ _ e) = validCase ctxt e
           validCase ctxt (ElaboratingArg _ _ _ e) = validCase ctxt e
           validCase ctxt _ = True
-           
-          recoverable ctxt (CantUnify r topx topy e _ _) 
+
+          recoverable ctxt (CantUnify r topx topy e _ _)
               = let topx' = normalise ctxt [] topx
                     topy' = normalise ctxt [] topy in
                     checkRec topx' topy'
@@ -398,7 +472,7 @@ checkPossible info fc tcgen fname lhs_in
           recoverable ctxt (ElaboratingArg _ _ _ e) = recoverable ctxt e
           recoverable _ _ = False
 
-          sameFam topx topy 
+          sameFam topx topy
               = case (unApply topx, unApply topy) of
                      ((P _ x _, _), (P _ y _, _)) -> x == y
                      _ -> False
@@ -409,11 +483,11 @@ checkPossible info fc tcgen fname lhs_in
 
           checkRec (App f a) p@(P _ _ _) = checkRec f p
           checkRec p@(P _ _ _) (App f a) = checkRec p f
-          checkRec fa@(App _ _) fa'@(App _ _) 
+          checkRec fa@(App _ _) fa'@(App _ _)
               | (f, as) <- unApply fa,
                 (f', as') <- unApply fa'
-                   = if (length as /= length as') 
-                        then checkRec f f' 
+                   = if (length as /= length as')
+                        then checkRec f f'
                         else checkRec f f' && and (zipWith checkRec as as')
           checkRec (P xt x _) (P yt y _) = x == y || ntRec xt yt
           checkRec _ _ = False
@@ -463,7 +537,7 @@ elabClause info opts (_, PClause fc fname lhs_in [] PImpossible [])
         let lhs = addImpl i lhs_in
         b <- checkPossible info fc tcgen fname lhs_in
         case b of
-            True -> tclift $ tfail (At fc 
+            True -> tclift $ tfail (At fc
                                 (Msg $ show lhs_in ++ " is a valid case"))
             False -> do ptm <- mkPatTm lhs_in
                         return (Left ptm, lhs)
@@ -501,6 +575,8 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
 
         let lhs_tm = orderPats (getInferTerm lhs')
         let lhs_ty = getInferType lhs'
+        let static_names = getStaticNames i lhs_tm
+
         logLvl 3 ("Elaborated: " ++ show lhs_tm)
         logLvl 3 ("Elaborated type: " ++ show lhs_ty)
         logLvl 5 ("Injective: " ++ show fname ++ " " ++ show inj)
@@ -516,9 +592,11 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
         -- These are the names we're not allowed to use on the RHS, because
         -- they're UniqueTypes and borrowed from another function.
         -- FIXME: There is surely a nicer way than this...
+        -- Issue #1615 on the Issue Tracker.
+        --     https://github.com/idris-lang/Idris-dev/issues/1615
         when (not (null borrowed)) $
           logLvl 5 ("Borrowed names on LHS: " ++ show borrowed)
-        
+
         logLvl 3 ("Normalised LHS: " ++ showTmImpls (delabMV i clhs))
 
         rep <- useREPL
@@ -541,7 +619,8 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
         let newargs = filter (\(n,_) -> n `notElem` uniqargs) newargs_all
 
         let winfo = pinfo info newargs defs windex
-        let wb = map (expandParamsD False ist decorate newargs defs) whereblock
+        let wb = map (mkStatic static_names) $
+                 map (expandParamsD False ist decorate newargs defs) whereblock
 
         -- Split the where block into declarations with a type, and those
         -- without
@@ -562,7 +641,7 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
            tclift $ elaborate ctxt (sMN 0 "patRHS") clhsty []
                     (do pbinds ist lhs_tm
                         mapM_ setinj (nub (params ++ inj))
-                        setNextName 
+                        setNextName
                         (_, _, is) <- errAt "right hand side of " fname
                                          (erun fc (build i winfo ERHS opts fname rhs))
                         errAt "right hand side of " fname
@@ -579,7 +658,7 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
 
         logLvl 5 "DONE CHECK"
         logLvl 2 $ "---> " ++ show rhs'
-        when (not (null defer)) $ iLOG $ "DEFERRED " ++ 
+        when (not (null defer)) $ iLOG $ "DEFERRED " ++
                     show (map (\ (n, (_,_,t)) -> (n, t)) defer)
         def' <- checkDef fc defer
         let def'' = map (\(n, (i, top, t)) -> (n, (i, top, t, False))) def'
@@ -599,8 +678,8 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
         logLvl 5 $ "Rechecking"
         logLvl 6 $ " ==> " ++ show (forget rhs')
 
-        (crhs, crhsty) <- if not inf 
-                             then recheckC_borrowing borrowed fc [] rhs'
+        (crhs, crhsty) <- if not inf
+                             then recheckC_borrowing True borrowed fc [] rhs'
                              else return (rhs', clhsty)
         logLvl 6 $ " ==> " ++ show crhsty ++ "   against   " ++ show clhsty
         case  converts ctxt [] clhsty crhsty of
@@ -612,16 +691,16 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
         -- then we'll try running it in reverse to improve error messages
         let (ret_fam, _) = unApply (getRetTy crhsty)
         rev <- case ret_fam of
-                    P _ rfamn _ -> 
+                    P _ rfamn _ ->
                         case lookupCtxt rfamn (idris_datatypes i) of
-                             [TI _ _ dopts _ _] -> 
+                             [TI _ _ dopts _ _] ->
                                  return (DataErrRev `elem` dopts)
                              _ -> return False
                     _ -> return False
 
         when (rev || ErrorReverse `elem` opts) $ do
            addIBC (IBCErrRev (crhs, clhs))
-           addErrRev (crhs, clhs) 
+           addErrRev (crhs, clhs)
         return $ (Right (clhs, crhs), lhs)
   where
     pinfo :: ElabInfo -> [(Name, PTerm)] -> [Name] -> Int -> ElabInfo
@@ -641,7 +720,7 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
     -- we know they can't be used on the RHS
     borrowedNames :: [Name] -> Term -> [Name]
     borrowedNames env (App (App (P _ (NS (UN lend) [owner]) _) _) arg)
-        | owner == txt "Ownership" && 
+        | owner == txt "Ownership" &&
           (lend == txt "lend" || lend == txt "Read") = getVs arg
        where
          getVs (V i) = [env!!i]
@@ -653,7 +732,7 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
              borrowedB b = borrowedNames env (binderTy b)
     borrowedNames _ _ = []
 
-    mkLHSapp t@(PRef _ _) = trace ("APP " ++ show t) $ PApp fc t []
+    mkLHSapp t@(PRef _ _) = PApp fc t []
     mkLHSapp t = t
 
     decorate (NS x ns)
@@ -689,7 +768,7 @@ elabClause info opts (cnum, PClause fc fname lhs_in withs rhs_in whereblock)
     isArg :: Name -> PDecl -> Bool
     isArg n (PClauses _ _ _ cs) = any isArg' cs
       where
-        isArg' (PClause _ _ (PApp _ _ args) _ _ _) 
+        isArg' (PClause _ _ (PApp _ _ args) _ _ _)
            = any (\x -> case x of
                           PRef _ n' -> n == n'
                           _ -> False) (map getTm args)
@@ -719,7 +798,8 @@ elabClause info opts (_, PWith fc fname lhs_in withs wval_in withblock)
         let lhs_tm = orderPats (getInferTerm lhs')
         let lhs_ty = getInferType lhs'
         let ret_ty = getRetTy (explicitNames (normalise ctxt [] lhs_ty))
-        logLvl 3 (show lhs_tm)
+        let static_names = getStaticNames i lhs_tm
+        logLvl 5 (show lhs_tm ++ "\n" ++ show static_names)
         (clhs, clhsty) <- recheckC fc [] lhs_tm
         logLvl 5 ("Checked " ++ show clhs)
         let bargs = getPBtys (explicitNames (normalise ctxt [] lhs_tm))
@@ -745,7 +825,7 @@ elabClause info opts (_, PWith fc fname lhs_in withs wval_in withblock)
         (cwval, cwvalty) <- recheckC fc [] (getInferTerm wval')
         let cwvaltyN = explicitNames (normalise ctxt [] cwvalty)
         let cwvalN = explicitNames (normalise ctxt [] cwval)
-        logLvl 5 ("With type " ++ show cwvalty ++ "\nRet type " ++ show ret_ty)
+        logLvl 3 ("With type " ++ show cwvalty ++ "\nRet type " ++ show ret_ty)
         let pvars = map fst (getPBtys cwvalty)
         -- we need the unelaborated term to get the names it depends on
         -- rather than a de Bruijn index.
@@ -769,7 +849,15 @@ elabClause info opts (_, PWith fc fname lhs_in withs wval_in withblock)
 
         let imps = getImps wtype -- add to implicits context
         putIState (i { idris_implicits = addDef wname imps (idris_implicits i) })
+        let statics = getStatics static_names wtype
+        logLvl 5 ("Static positions " ++ show statics)
+        i <- getIState
+        putIState (i { idris_statics = addDef wname statics (idris_statics i) })
+
         addIBC (IBCDef wname)
+        addIBC (IBCImp wname)
+        addIBC (IBCStatic wname)
+
         def' <- checkDef fc [(wname, (-1, Nothing, wtype))]
         let def'' = map (\(n, (i, top, t)) -> (n, (i, top, t, False))) def'
         addDeferred def''
@@ -867,5 +955,3 @@ elabClause info opts (_, PWith fc fname lhs_in withs wval_in withblock)
     split deps [] pre = (reverse pre, [])
 
     abstract wn wv wty (n, argty) = (n, substTerm wv (P Bound wn wty) argty)
-
-

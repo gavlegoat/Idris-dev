@@ -65,7 +65,7 @@ genClauses fc n xs given
         logLvl 5 $ show lhss
         logLvl 5 $ show (map length argss) ++ "\n" ++ show (map length all_args)
         logLvl 10 $ show argss ++ "\n" ++ show all_args
-        logLvl 1 $ "Original: \n" ++
+        logLvl 3 $ "Original: \n" ++
              showSep "\n" (map (\t -> showTm i (delab' i t True True)) xs)
         -- add an infinite supply of explicit arguments to update the possible
         -- cases for (the return type may be variadic, or function type, so
@@ -76,11 +76,11 @@ genClauses fc n xs given
                           p ++ repeat (PExp 0 [] (sMN 0 "gcarg") Placeholder)
                         _       -> repeat (pexp Placeholder)
         let tryclauses = mkClauses parg all_args
-        logLvl 2 $ show (length tryclauses) ++ " initially to check"
-        logLvl 1 $ showSep "\n" (map (showTm i) tryclauses)
+        logLvl 3 $ show (length tryclauses) ++ " initially to check"
+        logLvl 2 $ showSep "\n" (map (showTm i) tryclauses)
         let new = filter (noMatch i) (nub tryclauses)
-        logLvl 1 $ show (length new) ++ " clauses to check for impossibility"
-        logLvl 3 $ "New clauses: \n" ++ showSep "\n" (map (showTm i) new)
+        logLvl 2 $ show (length new) ++ " clauses to check for impossibility"
+        logLvl 4 $ "New clauses: \n" ++ showSep "\n" (map (showTm i) new)
 --           ++ " from:\n" ++ showSep "\n" (map (showImp True) tryclauses)
         return new
 --         return (map (\t -> PClause n t [] PImpossible []) new)
@@ -119,26 +119,6 @@ genClauses fc n xs given
             mkArg (a : as) = do a' <- a
                                 as' <- mkArg as
                                 return (a':as')
-
-fnub xs = fnub' [] xs
-
-fnub' acc (x : xs) | x `qelem` acc = fnub' acc (filter (not.(quickEq x)) xs)
-                   | otherwise = fnub' (x : acc) xs
-fnub' acc [] = acc
-
--- quick check for constructor equality
-quickEq :: PTerm -> PTerm -> Bool
-quickEq (PConstant n) (PConstant n') = n == n'
-quickEq (PRef _ n) (PRef _ n') = n == n'
-quickEq (PApp _ t as) (PApp _ t' as')
-    | length as == length as'
-       = quickEq t t' && and (zipWith quickEq (map getTm as) (map getTm as'))
-quickEq Placeholder Placeholder = True
-quickEq x y = False
-
-qelem x [] = False
-qelem x (y : ys) | x `quickEq` y = True
-                 | otherwise = qelem x ys
 
 -- FIXME: Just look for which one is the deepest, then generate all
 -- possibilities up to that depth.
@@ -244,6 +224,31 @@ genAll i args
                          -> PApp fc (PRef fc x) (map (upd Placeholder) pargs)
                       _ -> error "Can't happen - genAll"
 
+    fnub :: [PTerm] -> [PTerm]
+    fnub xs = fnub' [] xs
+
+    fnub' :: [PTerm] -> [PTerm] -> [PTerm]
+    fnub' acc (x : xs) | x `qelem` acc = fnub' acc (filter (not.(quickEq x)) xs)
+                       | otherwise = fnub' (x : acc) xs
+    fnub' acc [] = acc
+
+    -- quick check for constructor equality
+    quickEq :: PTerm -> PTerm -> Bool
+    quickEq (PConstant n) (PConstant n') = n == n'
+    quickEq (PRef _ n) (PRef _ n') = n == n'
+    quickEq (PApp _ t as) (PApp _ t' as')
+        | length as == length as'
+           = quickEq t t' && and (zipWith quickEq (map getTm as) (map getTm as'))
+    quickEq Placeholder Placeholder = True
+    quickEq x y = False
+
+    qelem :: PTerm -> [PTerm] -> Bool
+    qelem x [] = False
+    qelem x (y : ys) | x `quickEq` y = True
+                     | otherwise = qelem x ys
+
+
+upd :: t -> PArg' t -> PArg' t
 upd p' p = p { getTm = p' }
 
 -- Check whether function and all descendants cover all cases (partial is
@@ -463,8 +468,8 @@ buildSCG :: (FC, Name) -> Idris ()
 buildSCG (_, n) = do
    ist <- getIState
    case lookupCtxt n (idris_callgraph ist) of
-       [cg] -> case lookupDef n (tt_ctxt ist) of
-           [CaseOp _ _ _ pats _ cd] ->
+       [cg] -> case lookupDefExact n (tt_ctxt ist) of
+           Just (CaseOp _ _ _ pats _ cd) ->
              let (args, sc) = cases_totcheck cd in
                do logLvl 2 $ "Building SCG for " ++ show n ++ " from\n"
                                 ++ show pats ++ "\n" ++ show sc
@@ -706,8 +711,10 @@ checkMP ist i mp = if i > 0
         | [Partial _] <- lookupTotal f (tt_ctxt ist) = Partial (Other [f])
         | otherwise = Unchecked
 
+allNothing :: [Maybe a] -> Bool
 allNothing xs = null (collapseNothing (zip xs [0..]))
 
+collapseNothing :: [(Maybe a, b)] -> [(Maybe a, b)]
 collapseNothing ((Nothing, _) : xs)
    = filter (\ (x, _) -> case x of
                              Nothing -> False
@@ -715,10 +722,12 @@ collapseNothing ((Nothing, _) : xs)
 collapseNothing (x : xs) = x : collapseNothing xs
 collapseNothing [] = []
 
+noPartial :: [Totality] -> Totality
 noPartial (Partial p : xs) = Partial p
 noPartial (_ : xs)         = noPartial xs
 noPartial []               = Total []
 
+collapse :: [Totality] -> Totality
 collapse xs = collapse' Unchecked xs
 collapse' def (Total r : xs)   = Total r
 collapse' def (Unchecked : xs) = collapse' def xs
